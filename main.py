@@ -8,6 +8,7 @@ import math
 import json
 import speech_recognition as sr
 import textwrap
+import os
 from datetime import datetime
 
 # --- CONFIGURATION ---
@@ -78,10 +79,88 @@ class DesktopPet:
 
     def start_process_command(self, text):
         if not text: return
+        
+        # Try direct command detection first (Layer 1)
+        result = self.detect_command(text)
+        if result:
+            self.root.after(0, self.append_chat, 'Pet', result)
+            return
+
+        # No command found, ask AI (Layer 2)
         self.ai_timer_count = 0
         self.ai_timer_running = True
         self.update_thinking_timer()
         threading.Thread(target=self._ai_task, args=(text,), daemon=True).start()
+
+    def open_app(self, exe):
+        try:
+            subprocess.Popen(
+                f'start {exe}', 
+                shell=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        except:
+            try:
+                os.startfile(exe)
+            except:
+                pass
+
+    def close_app(self, exe):
+        try:
+            subprocess.run(
+                f'taskkill /IM {exe}.exe /F',
+                shell=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        except:
+            pass
+
+    def detect_command(self, text):
+        text_lower = text.lower()
+        
+        # App mapping
+        app_map = {
+            'chrome': 'chrome',
+            'firefox': 'firefox',
+            'notepad': 'notepad',
+            'calculator': 'calc',
+            'spotify': 'spotify',
+            'discord': 'discord',
+            'vscode': 'code',
+            'word': 'winword',
+            'excel': 'excel',
+            'explorer': 'explorer',
+            'edge': 'msedge',
+            'vlc': 'vlc',
+            'steam': 'steam',
+        }
+        
+        # Open app detection
+        open_keywords = ['open ', 'launch ', 'start ']
+        for keyword in open_keywords:
+            if keyword in text_lower:
+                for app, exe in app_map.items():
+                    if app in text_lower:
+                        self.open_app(exe)
+                        return f"Opening {app}!"
+        
+        # Close app detection
+        if 'close ' in text_lower or 'quit ' in text_lower:
+            for app, exe in app_map.items():
+                if app in text_lower:
+                    self.close_app(exe)
+                    return f"Closed {app}!"
+        
+        # Search detection
+        search_triggers = ['search ', 'google ', 'look up ', 'find ']
+        for trigger in search_triggers:
+            if trigger in text_lower:
+                query = text_lower.split(trigger)[-1].strip()
+                if query:
+                    webbrowser.open(f'https://google.com/search?q={query}')
+                    return f"Searching for {query}!"
+        
+        return None
 
     # --- CHAT WINDOW ---
     def append_chat(self, sender, text):
@@ -142,16 +221,16 @@ class DesktopPet:
                 self.chat_entry.delete(0, 'end')
                 self.append_chat('User', text)
                 self.start_process_command(text)
-                self.chat_entry.focus() # Maintain focus
+                self.chat_entry.focus() 
                 
         self.chat_entry.bind('<Return>', _handle_send)
+        self.on_send = _handle_send # Store for voice reference
         
+        self.mic_btn = tk.Button(bottom_frame, text='🎤', bg='#555555', fg='white', bd=0, font=('Segoe UI', 12), cursor='hand2', command=self.start_voice)
+        self.mic_btn.pack(side='left', padx=(5,2))
+
         send_btn = tk.Button(bottom_frame, text='➤', bg='#6c63ff', fg='white', bd=0, font=('Segoe UI', 12), cursor='hand2', command=_handle_send)
         send_btn.pack(side='left')
-        
-        # Keep mic button for functionality since it was requested in polish step
-        mic_btn = tk.Button(bottom_frame, text='🎤', bg='#6c63ff', fg='white', bd=0, font=('Segoe UI', 12), cursor='hand2', command=self.toggle_voice)
-        mic_btn.pack(side='left', padx=(5,0))
 
         # Chat display (Middle) - fills remaining space above bottom frame
         self.chat_display = tk.Text(self.chat_window, bg='#0a0a0f', fg='#e0e0ff', font=('Segoe UI', 10), wrap='word', bd=0, padx=10, pady=10)
@@ -193,7 +272,6 @@ class DesktopPet:
         self.context_menu.withdraw() # Hide immediately
         
         items = [
-            ('🎤  Voice Input', self.toggle_voice),
             ('🔍  Search & Chat', self.show_chat_window),
             ('⏻   Quit', self.root.destroy)
         ]
@@ -230,7 +308,7 @@ class DesktopPet:
             self.resume_after_id = None
             
         mx, my = event.x_root, event.y_root
-        self.context_menu.geometry(f'160x108+{mx}+{my}')
+        self.context_menu.geometry(f'160x72+{mx}+{my}')
         self.context_menu.deiconify()
         self.context_menu.lift()
 
@@ -396,54 +474,51 @@ class DesktopPet:
     # show_search_input has been replaced by show_chat_window
 
     # --- AI & VOICE ---
-    def toggle_voice(self):
-        if self.is_listening: self.is_listening = False
-        else: self.start_voice_thread()
-
-    def start_voice_thread(self):
-        self.is_listening = True
-        self.is_paused = True
-        if self.resume_after_id:
-            self.root.after_cancel(self.resume_after_id)
-            self.resume_after_id = None
-        self.show_chat_window()
-        if self.chat_display:
+    # --- AI & VOICE ---
+    def start_voice(self):
+        if self.is_recording:
+            self.is_recording = False
+            self.mic_btn.config(bg='#555555')
+            return
+        
+        self.is_recording = True
+        self.mic_btn.config(bg='#ff4757')
+        self.append_chat('Pet', 'Listening...')
+        
+        def listen():
+            r = sr.Recognizer()
             try:
-                self.chat_display.delete('temp.first', 'temp.last')
-            except tk.TclError:
-                pass
-            self.chat_display.insert('end', "Listening... 🎤\n", 'temp')
-            self.chat_display.see('end')
-        threading.Thread(target=self._voice_task, daemon=True).start()
+                with sr.Microphone() as source:
+                    r.adjust_for_ambient_noise(source, duration=0.3)
+                    audio = r.listen(source, timeout=5, phrase_time_limit=8)
+                text = r.recognize_google(audio)
+                self.root.after(0, self.voice_captured, text)
+            except sr.WaitTimeoutError:
+                self.root.after(0, self.append_chat, 'Pet', 'No speech detected!')
+            except Exception:
+                self.root.after(0, self.append_chat, 'Pet', 'Could not hear clearly!')
+            finally:
+                self.root.after(0, self.reset_mic_btn)
+        
+        threading.Thread(target=listen, daemon=True).start()
 
-    def _voice_task(self):
-        try:
-            with sr.Microphone() as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
-                text = self.recognizer.recognize_google(audio)
-                self.root.after(0, self.update_transcript, text)
-        except Exception:
-            pass
-        finally:
-            self.is_listening = False
-            self.root.after(0, self.clear_listening_ui)
+    def voice_captured(self, text):
+        if not self.chat_window: return
+        self.chat_entry.delete(0, 'end')
+        self.chat_entry.insert(0, text)
+        self.chat_entry.update()
+        # Auto send after 1 second
+        self.root.after(1000, lambda: self.on_send(None))
 
-    def clear_listening_ui(self):
-        if self.chat_display:
-            try:
-                self.chat_display.delete('temp.first', 'temp.last')
-            except tk.TclError:
-                pass
-        if not self.chat_window and not self.is_dragging:
-            if self.resume_after_id: self.root.after_cancel(self.resume_after_id)
-            self.resume_after_id = self.root.after(100, self.resume_movement)
-
-    def update_transcript(self, text):
-        self.show_chat_window()
-        if hasattr(self, 'chat_entry'):
-            self.chat_entry.delete(0, 'end')
-            self.chat_entry.insert(0, text)
+    def reset_mic_btn(self):
+        self.is_recording = False
+        if hasattr(self, 'mic_btn') and self.mic_btn.winfo_exists():
+            self.mic_btn.config(bg='#555555')
+            if self.chat_display:
+                try:
+                    self.chat_display.delete('temp.first', 'temp.last')
+                except tk.TclError:
+                    pass
 
     def update_thinking_timer(self):
         if self.ai_timer_running:
@@ -460,29 +535,17 @@ class DesktopPet:
     def _ai_task(self, prompt):
         try:
             system_prompt = """
-You are a friendly desktop assistant pet.
-Keep ALL replies under 2 sentences maximum.
-Be warm, casual and natural like a friend.
-
-ONLY return JSON for these specific commands:
-- User wants to open an application
-- User wants to close an application  
-- User wants to search something on Google
-
-JSON format ONLY these three:
-{"action":"openApp","target":"appname"}
-{"action":"closeApp","target":"appname"}
-{"action":"search","query":"search term"}
-
-For EVERYTHING else including:
-- Greetings (hi, hello, hey)
-- Questions (what is, how does, why)
-- Conversations (how are you, tell me)
-- Any other request
-Reply in plain friendly English ONLY.
-Never return JSON for these.
-Never explain yourself.
-Never use bullet points.
+You are a friendly desktop pet assistant.
+You handle casual conversation ONLY.
+PC commands like opening apps, searching Google,
+closing apps are handled by another system.
+You will only receive messages that need 
+a conversational response.
+Keep ALL replies under 2 sentences.
+Be warm, casual and friendly like a pet.
+Never say things like "I'll open that for you"
+or "Let me search that" - just have normal
+friendly conversation.
 """
             payload = {
                 "model": MODEL,
@@ -500,42 +563,14 @@ Never use bullet points.
             r = requests.post(OLLAMA_URL, json=payload, timeout=15)
             self.ai_timer_running = False
             reply = r.json()['message']['content']
-            self.root.after(0, self.handle_ai_response, reply, prompt)
+            self.root.after(0, self.append_chat, "Pet", reply.strip())
         except Exception as e:
             self.ai_timer_running = False
             self.root.after(0, self.append_chat, "Pet", f"AI Error: {e}")
 
     def handle_ai_response(self, reply, original):
-        reply = reply.strip().replace('```json','').replace('```','').strip()
-        try:
-            # Check if it looks like JSON
-            if '{' in reply and '}' in reply:
-                start, end = reply.find('{'), reply.rfind('}')+1
-                cmd = json.loads(reply[start:end])
-                action = cmd.get('action')
-                
-                if action == 'openApp':
-                    t = cmd.get('target', 'notepad')
-                    subprocess.Popen(f'start {t}', shell=True)
-                    self.root.after(0, self.append_chat, "Pet", f"✅ Opening {t}...")
-                elif action == 'closeApp':
-                    t = cmd.get('target', 'notepad')
-                    subprocess.Popen(f'taskkill /F /IM {t}.exe /T', shell=True)
-                    self.root.after(0, self.append_chat, "Pet", f"🛡️ Closing {t}...")
-                elif action == 'search':
-                    q = cmd.get('query', 'google')
-                    webbrowser.open(f'https://google.com/search?q={q}')
-                    self.root.after(0, self.append_chat, "Pet", f"🔍 Searching: {q}")
-                else: 
-                    # If it's another action or missing action, show response if available
-                    msg = cmd.get('response', reply)
-                    self.root.after(0, self.append_chat, "Pet", msg)
-            else:
-                # Plain English reply
-                self.root.after(0, self.append_chat, "Pet", reply)
-        except Exception:
-            # Fallback for any parsing errors
-            self.root.after(0, self.append_chat, "Pet", reply)
+        # Deprecated: AI no longer returns commands, but keeping for reference
+        self.root.after(0, self.append_chat, "Pet", reply.strip())
 
     def check_ollama_startup(self):
         def _check():
