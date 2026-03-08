@@ -43,8 +43,22 @@ class DesktopPet:
         self.on_send = None
         
         self.root = tk.Tk()
+        # Get TRUE screen dimensions
         self.screen_w = self.root.winfo_screenwidth()
         self.screen_h = self.root.winfo_screenheight()
+        
+        # Pet window size
+        self.pet_w = 100
+        self.pet_h = 100
+        
+        # TRUE boundaries pet can reach
+        self.max_x = self.screen_w - self.pet_w
+        self.max_y = self.screen_h - self.pet_h
+        self.min_x = 0
+        self.min_y = 0
+
+        print(f'Screen: {self.screen_w}x{self.screen_h}')
+        print(f'Max X: {self.max_x} Max Y: {self.max_y}')
         
         # --- ROOT WINDOW TRANSPARENCY FIX ---
         self.win_w, self.win_h = 100, 100
@@ -60,9 +74,8 @@ class DesktopPet:
         self.canvas.pack()
         
         # State
-        self.pos_x, self.pos_y = self.screen_w // 2, self.screen_h // 2
-        # Note: self.target_x/y already set above for safety, but we refine here
-        self.target_x, self.target_y = self.pos_x, self.pos_y
+        self.pet_x, self.pet_y = self.screen_w // 2, self.screen_h // 2
+        self.target_x, self.target_y = self.pet_x, self.pet_y
         self.is_dragging = False
         self.facing_right = True
         self.frame = 0
@@ -88,6 +101,9 @@ class DesktopPet:
             with self.microphone as source:
                 self.recognizer.adjust_for_ambient_noise(source, duration=1)
         threading.Thread(target=calibrate, daemon=True).start()
+
+        self.installed_apps = {}
+        threading.Thread(target=self.scan_installed_apps, daemon=True).start()
         
         # --- UI COMPONENTS ---
         self.create_widgets()
@@ -126,65 +142,285 @@ class DesktopPet:
         self.update_thinking_timer()
         threading.Thread(target=self._ai_task, args=(text,), daemon=True).start()
 
-    def open_app(self, exe):
-        try:
-            subprocess.Popen(
-                f'start {exe}', 
-                shell=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-        except:
+    def scan_installed_apps(self):
+        import glob
+        import winreg
+        
+        apps = {}
+        
+        # Scan Program Files folders
+        search_paths = [
+            'C:/Program Files/**/*.exe',
+            'C:/Program Files (x86)/**/*.exe',
+            f'C:/Users/{os.getenv("USERNAME")}/AppData/Local/**/*.exe',
+            f'C:/Users/{os.getenv("USERNAME")}/AppData/Roaming/**/*.exe',
+        ]
+        
+        for pattern in search_paths:
             try:
-                os.startfile(exe)
+                for exe in glob.glob(pattern, recursive=True):
+                    name = os.path.basename(exe)
+                    name_clean = name.replace('.exe','').lower()
+                    apps[name_clean] = exe
             except:
                 pass
-
-    def close_app(self, exe):
-        try:
-            subprocess.run(
-                f'taskkill /IM {exe}.exe /F',
-                shell=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-        except:
-            pass
-
-    def detect_command(self, text):
-        text_lower = text.lower()
         
-        # App mapping
-        app_map = {
+        # Scan Windows Registry for installed apps
+        reg_paths = [
+            r'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths',
+            r'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths',
+        ]
+        
+        for reg_path in reg_paths:
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
+                for i in range(winreg.QueryInfoKey(key)[0]):
+                    try:
+                        sub_name = winreg.EnumKey(key, i)
+                        sub_key = winreg.OpenKey(key, sub_name)
+                        path = winreg.QueryValue(sub_key, '')
+                        clean = sub_name.replace('.exe','').lower()
+                        apps[clean] = path
+                    except:
+                        pass
+            except:
+                pass
+        
+        # Add common app aliases manually
+        aliases = {
             'chrome': 'chrome',
+            'google chrome': 'chrome',
             'firefox': 'firefox',
+            'mozilla': 'firefox',
+            'edge': 'msedge',
+            'microsoft edge': 'msedge',
             'notepad': 'notepad',
+            'notepad++': 'notepad++',
             'calculator': 'calc',
+            'calc': 'calc',
             'spotify': 'spotify',
             'discord': 'discord',
             'vscode': 'code',
+            'visual studio code': 'code',
+            'vs code': 'code',
             'word': 'winword',
+            'microsoft word': 'winword',
             'excel': 'excel',
-            'explorer': 'explorer',
-            'edge': 'msedge',
+            'microsoft excel': 'excel',
+            'powerpoint': 'powerpnt',
+            'teams': 'teams',
+            'microsoft teams': 'teams',
+            'zoom': 'zoom',
             'vlc': 'vlc',
             'steam': 'steam',
+            'obs': 'obs64',
+            'paint': 'mspaint',
+            'task manager': 'taskmgr',
+            'file explorer': 'explorer',
+            'explorer': 'explorer',
+            'cmd': 'cmd',
+            'command prompt': 'cmd',
+            'powershell': 'powershell',
+            'whatsapp': 'whatsapp',
+            'telegram': 'telegram',
+            'skype': 'skype',
+            'blender': 'blender',
+            'photoshop': 'photoshop',
+            'premiere': 'premiere',
+            'illustrator': 'illustrator',
+            'postman': 'postman',
+            'figma': 'figma',
+            'slack': 'slack',
+            'notion': 'notion',
+            'cursor': 'cursor',
+            'pycharm': 'pycharm64',
+            'intellij': 'idea64',
+            'android studio': 'studio64',
         }
         
-        # Open app detection
-        open_keywords = ['open ', 'launch ', 'start ']
-        for keyword in open_keywords:
+        self.installed_apps = {**apps, **aliases}
+        print(f'Scanned {len(apps)} apps!')
+
+    def find_app(self, app_name):
+        name = app_name.lower().strip()
+        
+        # Direct match
+        if name in self.installed_apps:
+            return self.installed_apps[name]
+        
+        # Partial match
+        for key, path in self.installed_apps.items():
+            if name in key or key in name:
+                return path
+        
+        # Fallback: just try running the name directly
+        return name
+
+    def open_app(self, app_name):
+        try:
+            path = self.find_app(app_name)
+            
+            # Try full path first
+            if os.path.exists(path):
+                subprocess.Popen(
+                    path,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                return True
+            
+            # Try with start command
+            subprocess.Popen(
+                f'start "" "{path}"',
+                shell=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            return True
+        except:
+            try:
+                # Last resort - use os.startfile
+                os.startfile(app_name)
+                return True
+            except:
+                return False
+
+    def close_app(self, app_name):
+        name = app_name.lower().strip()
+        
+        # Build exe name variations to try
+        exe_variations = [
+            f'{name}.exe',
+            f'{name}64.exe',
+            f'{name}32.exe',
+        ]
+        
+        # Common app to exe mappings
+        close_map = {
+            'chrome': 'chrome.exe',
+            'google chrome': 'chrome.exe',
+            'firefox': 'firefox.exe',
+            'edge': 'msedge.exe',
+            'microsoft edge': 'msedge.exe',
+            'spotify': 'spotify.exe',
+            'discord': 'discord.exe',
+            'vscode': 'code.exe',
+            'vs code': 'code.exe',
+            'visual studio code': 'code.exe',
+            'notepad': 'notepad.exe',
+            'notepad++': 'notepad++.exe',
+            'calculator': 'calculatorapp.exe',
+            'word': 'winword.exe',
+            'excel': 'excel.exe',
+            'powerpoint': 'powerpnt.exe',
+            'teams': 'teams.exe',
+            'zoom': 'zoom.exe',
+            'vlc': 'vlc.exe',
+            'steam': 'steam.exe',
+            'obs': 'obs64.exe',
+            'paint': 'mspaint.exe',
+            'explorer': 'explorer.exe',
+            'whatsapp': 'whatsapp.exe',
+            'telegram': 'telegram.exe',
+            'slack': 'slack.exe',
+            'skype': 'skype.exe',
+            'pycharm': 'pycharm64.exe',
+            'cursor': 'cursor.exe',
+            'postman': 'postman.exe',
+            'figma': 'figma.exe',
+        }
+        
+        # Direct map match
+        if name in close_map:
+            exe = close_map[name]
+            subprocess.run(
+                f'taskkill /IM {exe} /F',
+                shell=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            return True
+        
+        # Try variations
+        for exe in exe_variations:
+            try:
+                result = subprocess.run(
+                    f'taskkill /IM {exe} /F',
+                    shell=True,
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                if result.returncode == 0:
+                    return True
+            except:
+                pass
+        
+        # Last resort - find process by name
+        try:
+            subprocess.run(
+                f'taskkill /FI "WINDOWTITLE eq *{name}*" /F',
+                shell=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            return True
+        except:
+            return False
+
+    def detect_command(self, text):
+        text_lower = text.lower().strip()
+        
+        close_keywords = [
+            'close ', 'quit ', 'exit ', 
+            'kill ', 'shut ', 'stop '
+        ]
+        
+        open_keywords = [
+            'open ', 'launch ', 'start ', 
+            'go to ', 'visit ', 'browse '
+        ]
+        
+        # ✅ CHECK CLOSE FIRST always
+        for keyword in close_keywords:
             if keyword in text_lower:
-                for app, exe in app_map.items():
-                    if app in text_lower:
-                        self.open_app(exe)
-                        return f"Opening {app}!"
-        
-        # Close app detection
-        if 'close ' in text_lower or 'quit ' in text_lower:
-            for app, exe in app_map.items():
-                if app in text_lower:
-                    self.close_app(exe)
-                    return f"Closed {app}!"
-        
+                app_name = text_lower.split(keyword)[-1].strip()
+                
+                # Check if closing a browser directly
+                common_browsers = {
+                    'chrome': 'chrome.exe',
+                    'firefox': 'firefox.exe',
+                    'edge': 'msedge.exe',
+                    'opera': 'opera.exe',
+                    'brave': 'brave.exe',
+                }
+                for browser, exe in common_browsers.items():
+                    if browser in app_name:
+                        subprocess.run(
+                            f'taskkill /IM {exe} /F',
+                            shell=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW
+                        )
+                        return f'Closed {browser}!'
+                
+                # Check if closing a website tab
+                common_sites_close = {
+                    'youtube': 'chrome.exe',
+                    'google': 'chrome.exe',
+                    'facebook': 'chrome.exe',
+                    'instagram': 'chrome.exe',
+                    'netflix': 'chrome.exe',
+                    'whatsapp': 'chrome.exe',
+                    'twitter': 'chrome.exe',
+                    'reddit': 'chrome.exe',
+                }
+                for site in common_sites_close.keys():
+                    if site in app_name:
+                        import pyautogui
+                        pyautogui.hotkey('ctrl', 'w')
+                        return f'Closed {site} tab!'
+                
+                success = self.close_app(app_name)
+                if success:
+                    return f'Closed {app_name}!'
+                else:
+                    return f'Could not find {app_name} running!'
+
         # Search detection
         search_triggers = ['search ', 'google ', 'look up ', 'find ']
         for trigger in search_triggers:
@@ -194,6 +430,53 @@ class DesktopPet:
                     webbrowser.open(f'https://google.com/search?q={query}')
                     return f"Searching for {query}!"
         
+        # ✅ THEN CHECK OPEN after close is ruled out
+        for keyword in open_keywords:
+            if keyword in text_lower:
+                app_name = text_lower.split(keyword)[-1].strip()
+                
+                # Check websites first
+                common_sites = {
+                    'youtube': 'https://youtube.com',
+                    'google': 'https://google.com',
+                    'facebook': 'https://facebook.com',
+                    'instagram': 'https://instagram.com',
+                    'twitter': 'https://twitter.com',
+                    'x': 'https://x.com',
+                    'github': 'https://github.com',
+                    'reddit': 'https://reddit.com',
+                    'netflix': 'https://netflix.com',
+                    'amazon': 'https://amazon.com',
+                    'whatsapp': 'https://web.whatsapp.com',
+                    'gmail': 'https://gmail.com',
+                    'chatgpt': 'https://chat.openai.com',
+                    'claude': 'https://claude.ai',
+                    'linkedin': 'https://linkedin.com',
+                    'spotify': 'https://open.spotify.com',
+                    'twitch': 'https://twitch.tv',
+                }
+                
+                for site, url in common_sites.items():
+                    if site in app_name:
+                        webbrowser.open(url)
+                        return f'Opening {site}!'
+                
+                # Check if its a URL
+                if any(x in app_name for x in ['.com','.org','.net','.io','www.']):
+                    url = app_name
+                    if not url.startswith('http'):
+                        url = 'https://' + url
+                    webbrowser.open(url)
+                    return f'Opening {url}!'
+                
+                # Try opening as app
+                success = self.open_app(app_name)
+                if success:
+                    return f'Opening {app_name}!'
+                else:
+                    return f'Could not find {app_name}!'
+        
+        # No command detected - send to AI
         return None
 
     # --- CHAT WINDOW ---
@@ -550,23 +833,31 @@ class DesktopPet:
         if self.is_paused:
             self.canvas.coords(self.shape_ids['pause'], cx+33, curr_y-23)
 
+    def pick_new_target(self):
+        self.target_x = random.randint(self.min_x, self.max_x)
+        self.target_y = random.randint(self.min_y, self.max_y)
+
     # --- MOVEMENT LOOP ---
     def move_pet(self):
         self.frame += 1
         if not self.is_dragging and not self.is_paused and not self.is_frozen:
-            dx, dy = self.target_x - self.pos_x, self.target_y - self.pos_y
+            # Move towards target
+            dx, dy = self.target_x - self.pet_x, self.target_y - self.pet_y
             dist = (dx**2 + dy**2)**0.5
             if dist > 3:
-                self.pos_x += (dx / dist) * 3
-                self.pos_y += (dy / dist) * 3
+                self.pet_x += (dx / dist) * 3
+                self.pet_y += (dy / dist) * 3
                 self.facing_right = dx > 0
             else:
                 if self.frame % 150 == 0:
-                    self.target_x = random.randint(50, self.screen_w - 100)
-                    self.target_y = random.randint(50, self.screen_h - 100)
+                    self.pick_new_target()
 
         # Apply movement
-        self.root.geometry(f"100x100+{int(self.pos_x)}+{int(self.pos_y)}")
+        # Ensure coordinates are within screen bounds
+        self.pet_x = max(self.min_x, min(self.pet_x, self.max_x))
+        self.pet_y = max(self.min_y, min(self.pet_y, self.max_y))
+        
+        self.root.geometry(f"{self.pet_w}x{self.pet_h}+{int(self.pet_x)}+{int(self.pet_y)}")
         self.draw_pet()
 
         self.root.after(40, self.move_pet)
@@ -586,14 +877,14 @@ class DesktopPet:
     def drag_move(self, event):
         self.is_dragging = True
         self.is_paused = True
-        self.pos_x = event.x_root - self._drag_x
-        self.pos_y = event.y_root - self._drag_y
+        self.pet_x = event.x_root - self._drag_x
+        self.pet_y = event.y_root - self._drag_y
         
         # Clamp to screen bounds
-        self.pos_x = max(0, min(self.pos_x, self.screen_w - 100))
-        self.pos_y = max(0, min(self.pos_y, self.screen_h - 100))
+        self.pet_x = max(self.min_x, min(self.pet_x, self.max_x))
+        self.pet_y = max(self.min_y, min(self.pet_y, self.max_y))
         
-        self.root.geometry(f'100x100+{int(self.pos_x)}+{int(self.pos_y)}')
+        self.root.geometry(f'{self.pet_w}x{self.pet_h}+{int(self.pet_x)}+{int(self.pet_y)}')
 
     def drag_end(self, event):
         self.is_dragging = False
