@@ -34,6 +34,8 @@ class DesktopPet:
         self.chat_history = []
         self.chat_window = None
         self.context_menu_win = None
+        self.context_menu = None
+        self.menu_just_opened = False
         self.mic_btn = None
         
         self.chat_entry = None
@@ -77,6 +79,15 @@ class DesktopPet:
         # self.chat_window already set above
         
         self.recognizer = sr.Recognizer()
+        self.microphone = sr.Microphone()
+        self.stop_listening = None
+
+        # Calibrate microphone ONCE at startup 
+        # in background thread so it is instant later
+        def calibrate():
+            with self.microphone as source:
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+        threading.Thread(target=calibrate, daemon=True).start()
         
         # --- UI COMPONENTS ---
         self.create_widgets()
@@ -283,7 +294,7 @@ class DesktopPet:
         self.chat_entry.bind('<Return>', _handle_send)
         self.on_send = _handle_send # Store for voice reference
         
-        self.mic_btn = tk.Button(bottom_frame, text='🎤', bg='#555555', fg='white', bd=0, font=('Segoe UI', 12), cursor='hand2', command=self.start_voice)
+        self.mic_btn = tk.Button(bottom_frame, text='🎤', bg='#555555', fg='white', bd=0, font=('Segoe UI', 12), cursor='hand2', command=self.toggle_voice)
         self.mic_btn.pack(side='left', padx=(5,2))
 
         send_btn = tk.Button(bottom_frame, text='➤', bg='#6c63ff', fg='white', bd=0, font=('Segoe UI', 12), cursor='hand2', command=_handle_send)
@@ -365,9 +376,17 @@ class DesktopPet:
         self.context_menu.configure(bg='#0a0a0f', highlightbackground='#6c63ff', highlightthickness=1)
         self.context_menu.withdraw() # Hide immediately
         
+        # Add bindings to close context menu when clicking outside
+        self.root.bind('<ButtonPress-1>', lambda e: None if self.menu_just_opened else self.close_context_menu(), add='+')
+        self.root.bind('<ButtonPress-3>', lambda e: self.show_context_menu(e), add='+')
+        self.context_menu.bind('<FocusOut>', lambda e: self.close_context_menu())
+        self.context_menu.bind('<Escape>', lambda e: self.close_context_menu())
+        self.root.bind('<Escape>', lambda e: self.close_context_menu())
+        self.canvas.bind('<ButtonPress-1>', lambda e: self.close_context_menu(), add='+')
+        
         items = [
             ('📌 Freeze Pet', self.toggle_freeze),
-            ('🔍  Search & Chat', self.show_chat_window),
+            ('🔍 Search & Chat', self.show_chat_window),
             ('⏻   Quit', self.root.destroy)
         ]
         
@@ -384,13 +403,15 @@ class DesktopPet:
                 font=('Segoe UI', 11),
                 relief='flat',
                 anchor='w',
-                padx=12,
+                padx=15,
                 cursor='hand2',
                 activebackground='#1a1a2e',
-                activeforeground='white',
+                activeforeground='#c9b8ff',
+                bd=0,
+                width=18,
                 command=handler
             )
-            btn.pack(fill='x', ipady=6)
+            btn.pack(fill='x', ipady=10)
             if 'Freeze' in label:
                 self.freeze_btn = btn
             
@@ -398,6 +419,7 @@ class DesktopPet:
             btn.bind('<Leave>', lambda e, b=btn: b.config(bg='#0a0a0f'))
 
     def show_context_menu(self, event):
+        self.menu_just_opened = True
         # Stop pet from moving while menu is open
         self.is_paused = True
         if self.resume_after_id:
@@ -405,17 +427,31 @@ class DesktopPet:
             self.resume_after_id = None
             
         mx, my = event.x_root, event.y_root
-        self.context_menu.geometry(f'160x108+{mx}+{my}')
+        self.context_menu.geometry(f'190x138+{mx}+{my}')
         self.context_menu.deiconify()
         self.context_menu.lift()
+        self.context_menu.focus_force()
+        
+        # Reset flag after 200ms
+        self.root.after(200, self._reset_menu_flag)
+        return "break"
+
+    def _reset_menu_flag(self):
+        self.menu_just_opened = False
 
     def close_context_menu(self):
-        if self.context_menu and self.context_menu.winfo_ismapped():
-            self.context_menu.withdraw()
-            # Resume movement when closed
-            if not self.chat_window and not self.is_listening and not self.is_dragging and not self.is_frozen:
-                if self.resume_after_id: self.root.after_cancel(self.resume_after_id)
-                self.resume_after_id = self.root.after(100, self.resume_movement)
+        if self.menu_just_opened:
+            return  # dont close if just opened
+        try:
+            if self.context_menu and self.context_menu.winfo_exists():
+                was_open = self.context_menu.winfo_ismapped()
+                self.context_menu.withdraw()
+                # Resume movement when closed
+                if was_open and not self.chat_window and not self.is_listening and not self.is_dragging and not self.is_frozen:
+                    if self.resume_after_id: self.root.after_cancel(self.resume_after_id)
+                    self.resume_after_id = self.root.after(100, self.resume_movement)
+        except:
+            pass
 
     # --- PET DESIGN & CLICK BINDING ---
     def draw_pet(self):
@@ -575,50 +611,62 @@ class DesktopPet:
     # show_search_input has been replaced by show_chat_window
 
     # --- AI & VOICE ---
-    def start_voice(self):
+    def toggle_voice(self):
         if self.is_recording:
-            self.is_recording = False
-            self.mic_btn.config(bg='#555555')
-            return
-        
+            self.stop_recording()
+        else:
+            self.start_recording()
+
+    def start_recording(self):
         self.is_recording = True
-        self.mic_btn.config(bg='#ff4757')
+        self.mic_btn.config(bg='#ff4757', text='⏹')
         self.append_chat('Pet', 'Listening...')
         
-        def listen():
-            r = sr.Recognizer()
-            try:
-                with sr.Microphone() as source:
-                    r.adjust_for_ambient_noise(source, duration=0.3)
-                    audio = r.listen(source, timeout=5, phrase_time_limit=8)
-                text = r.recognize_google(audio)
-                self.root.after(0, self.voice_captured, text)
-            except sr.WaitTimeoutError:
-                self.root.after(0, self.append_chat, 'Pet', 'No speech detected!')
-            except Exception:
-                self.root.after(0, self.append_chat, 'Pet', 'Could not hear clearly!')
-            finally:
-                self.root.after(0, self.reset_mic_btn)
-        
-        threading.Thread(target=listen, daemon=True).start()
+        # Use listen_in_background for continuous recording
+        self.stop_listening = self.recognizer.listen_in_background(
+            self.microphone,
+            self.on_speech_detected,
+            phrase_time_limit=5
+        )
 
-    def voice_captured(self, text):
-        if not self.chat_window: return
-        self.chat_entry.delete(0, 'end')
-        self.chat_entry.insert(0, text)
-        self.chat_entry.update()
-        # Auto send after 1 second
-        self.root.after(1000, lambda: self.on_send(None))
-
-    def reset_mic_btn(self):
+    def stop_recording(self):
         self.is_recording = False
-        if hasattr(self, 'mic_btn') and self.mic_btn.winfo_exists():
-            self.mic_btn.config(bg='#555555')
-            if self.chat_display:
-                try:
-                    self.chat_display.delete('temp.first', 'temp.last')
-                except tk.TclError:
-                    pass
+        self.mic_btn.config(bg='#555555', text='🎤')
+        
+        # Stop background listener
+        if self.stop_listening:
+            self.stop_listening(wait_for_stop=False)
+            self.stop_listening = None
+
+    def on_speech_detected(self, recognizer, audio):
+        # This runs in background thread automatically
+        try:
+            text = recognizer.recognize_google(audio)
+            if text and self.is_recording:
+                # Append to input box simultaneously
+                self.root.after(0, self.append_voice_text, text)
+        except sr.UnknownValueError:
+            pass  # Ignore silence silently
+        except sr.RequestError:
+            self.root.after(0, self.append_chat, 'Pet', 'Voice service error!')
+
+    def append_voice_text(self, text):
+        # Add recognized text to input box live
+        current = self.chat_entry.get()
+        if current:
+            self.chat_entry.insert('end', ' ' + text)
+        else:
+            self.chat_entry.insert(0, text)
+        self.chat_entry.update()
+        
+        # Show in chat what user is saying live
+        # Update or add live transcript line
+        self.chat_display.configure(state='normal')
+        self.chat_display.delete('end-2l', 'end-1l')
+        self.chat_display.insert('end', f'🎤 {text}\n', 'voice_text')
+        self.chat_display.tag_config('voice_text', foreground='#2ed573', font=('Segoe UI', 10, 'italic'))
+        self.chat_display.configure(state='disabled')
+        self.chat_display.see('end')
 
     def update_thinking_timer(self):
         if self.ai_timer_running:
