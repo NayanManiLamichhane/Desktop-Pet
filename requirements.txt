@@ -1,0 +1,6 @@
+pyautogui
+speechrecognition
+requests
+pywin32
+pillow
+pyaudio
