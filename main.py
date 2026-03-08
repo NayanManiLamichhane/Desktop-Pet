@@ -17,6 +17,29 @@ MODEL = "llama3.2" # Default, overridden by logic below
 
 class DesktopPet:
     def __init__(self):
+        # Initialize all attributes to prevent AttributeError
+        self.is_recording = False
+        self.is_paused = False
+        self.is_frozen = False
+        self.freeze_btn = None
+        self.pet_x = 100
+        self.pet_y = 100
+        self.target_x = 300
+        self.target_y = 300
+        self.anim_frame = 0
+        self.drag_x = 0
+        self.drag_y = 0
+        self.chat_drag_x = 0
+        self.chat_drag_y = 0
+        self.chat_history = []
+        self.chat_window = None
+        self.context_menu_win = None
+        self.mic_btn = None
+        
+        self.chat_entry = None
+        self.chat_display = None
+        self.on_send = None
+        
         self.root = tk.Tk()
         self.screen_w = self.root.winfo_screenwidth()
         self.screen_h = self.root.winfo_screenheight()
@@ -36,6 +59,7 @@ class DesktopPet:
         
         # State
         self.pos_x, self.pos_y = self.screen_w // 2, self.screen_h // 2
+        # Note: self.target_x/y already set above for safety, but we refine here
         self.target_x, self.target_y = self.pos_x, self.pos_y
         self.is_dragging = False
         self.facing_right = True
@@ -44,14 +68,13 @@ class DesktopPet:
         self.is_blinking = False
         self.context_menu = None
         self.is_listening = False
-        self.is_paused = False
+        # self.is_paused already set above
         self.resume_after_id = None
         
         self.ai_timer_count = 0
         self.ai_timer_running = False
         self.chat_messages = []
-        self.chat_window = None
-        self.chat_display = None
+        # self.chat_window already set above
         
         self.recognizer = sr.Recognizer()
         
@@ -163,6 +186,34 @@ class DesktopPet:
         return None
 
     # --- CHAT WINDOW ---
+    def get_smart_position(self):
+        pet_x = self.root.winfo_x()
+        pet_y = self.root.winfo_y()
+        win_w = 300
+        win_h = 400
+        
+        # Try LEFT of pet first
+        x = pet_x - win_w - 10
+        y = pet_y
+        
+        # If goes off LEFT edge, place RIGHT of pet
+        if x < 0:
+            x = pet_x + 110
+        
+        # If goes off RIGHT edge, center on screen
+        if x + win_w > self.screen_w:
+            x = (self.screen_w - win_w) // 2
+        
+        # If goes off BOTTOM edge, move up
+        if y + win_h > self.screen_h:
+            y = self.screen_h - win_h - 20
+        
+        # If goes off TOP edge, place at top
+        if y < 0:
+            y = 20
+        
+        return x, y
+
     def append_chat(self, sender, text):
         self.chat_messages.append((sender, text))
         self.show_chat_window()
@@ -194,14 +245,20 @@ class DesktopPet:
         self.chat_window.attributes('-topmost', True)
         self.chat_window.configure(bg='#0a0a0f', highlightbackground='#6c63ff', highlightthickness=1)
         
-        px, py = self.root.winfo_x(), self.root.winfo_y()
-        self.chat_window.geometry(f'300x400+{px+160}+{py-100}')
+        x, y = self.get_smart_position()
+        self.chat_window.geometry(f'300x400+{x}+{y}')
         
         # Header (Top)
         header = tk.Frame(self.chat_window, bg='#0a0a0f')
         header.pack(side='top', fill='x')
-        tk.Label(header, text="🐾 Pet Assistant", bg='#0a0a0f', fg='#e0e0ff', font=('Segoe UI', 10, 'bold')).pack(side='left', padx=10, pady=5)
+        title_label = tk.Label(header, text="🐾 Pet Assistant", bg='#0a0a0f', fg='#e0e0ff', font=('Segoe UI', 10, 'bold'))
+        title_label.pack(side='left', padx=10, pady=5)
         tk.Button(header, text='✕', bg='#ff4757', fg='white', bd=0, command=self.close_chat_window, cursor='hand2').pack(side='right', padx=5)
+        
+        header.bind('<ButtonPress-1>', self.chat_drag_start)
+        header.bind('<B1-Motion>', self.chat_drag_move)
+        title_label.bind('<ButtonPress-1>', self.chat_drag_start)
+        title_label.bind('<B1-Motion>', self.chat_drag_move)
         
         # Input area (Bottom)
         bottom_frame = tk.Frame(self.chat_window, bg='#0a0a0f', height=50)
@@ -259,11 +316,48 @@ class DesktopPet:
             self.chat_window.destroy()
             self.chat_window = None
             self.chat_display = None
-        if not self.is_dragging and not self.is_listening:
+        if not self.is_dragging and not self.is_listening and not self.is_frozen:
             if self.resume_after_id: self.root.after_cancel(self.resume_after_id)
             self.resume_after_id = self.root.after(100, self.resume_movement)
 
+    def chat_drag_start(self, event):
+        self.chat_drag_x = event.x_root - self.chat_window.winfo_x()
+        self.chat_drag_y = event.y_root - self.chat_window.winfo_y()
+
+    def chat_drag_move(self, event):
+        new_x = event.x_root - self.chat_drag_x
+        new_y = event.y_root - self.chat_drag_y
+        
+        # Clamp to screen bounds
+        new_x = max(0, min(new_x, self.screen_w - 300))
+        new_y = max(0, min(new_y, self.screen_h - 400))
+        
+        self.chat_window.geometry(f'300x400+{new_x}+{new_y}')
+
     # --- CONTEXT MENU ---
+    def toggle_freeze(self):
+        self.is_frozen = not self.is_frozen
+        
+        if self.is_frozen:
+            self.is_paused = True
+            # Show pin on pet
+            self.canvas.create_text(
+                88, 14,
+                text='📌',
+                font=('Arial', 12),
+                tags='pin_icon'
+            )
+            # Update menu label
+            if self.freeze_btn:
+                self.freeze_btn.config(text='📌 Unfreeze Pet')
+        else:
+            self.is_paused = False
+            # Remove pin from pet
+            self.canvas.delete('pin_icon')
+            # Update menu label
+            if self.freeze_btn:
+                self.freeze_btn.config(text='📌 Freeze Pet')
+
     def _create_context_menu(self):
         self.context_menu = tk.Toplevel(self.root)
         self.context_menu.overrideredirect(True)
@@ -272,6 +366,7 @@ class DesktopPet:
         self.context_menu.withdraw() # Hide immediately
         
         items = [
+            ('📌 Freeze Pet', self.toggle_freeze),
             ('🔍  Search & Chat', self.show_chat_window),
             ('⏻   Quit', self.root.destroy)
         ]
@@ -296,6 +391,8 @@ class DesktopPet:
                 command=handler
             )
             btn.pack(fill='x', ipady=6)
+            if 'Freeze' in label:
+                self.freeze_btn = btn
             
             btn.bind('<Enter>', lambda e, b=btn: b.config(bg='#1a1a2e'))
             btn.bind('<Leave>', lambda e, b=btn: b.config(bg='#0a0a0f'))
@@ -308,7 +405,7 @@ class DesktopPet:
             self.resume_after_id = None
             
         mx, my = event.x_root, event.y_root
-        self.context_menu.geometry(f'160x72+{mx}+{my}')
+        self.context_menu.geometry(f'160x108+{mx}+{my}')
         self.context_menu.deiconify()
         self.context_menu.lift()
 
@@ -316,7 +413,7 @@ class DesktopPet:
         if self.context_menu and self.context_menu.winfo_ismapped():
             self.context_menu.withdraw()
             # Resume movement when closed
-            if not self.chat_window and not self.is_listening and not self.is_dragging:
+            if not self.chat_window and not self.is_listening and not self.is_dragging and not self.is_frozen:
                 if self.resume_after_id: self.root.after_cancel(self.resume_after_id)
                 self.resume_after_id = self.root.after(100, self.resume_movement)
 
@@ -420,7 +517,7 @@ class DesktopPet:
     # --- MOVEMENT LOOP ---
     def move_pet(self):
         self.frame += 1
-        if not self.is_dragging and not self.is_paused:
+        if not self.is_dragging and not self.is_paused and not self.is_frozen:
             dx, dy = self.target_x - self.pos_x, self.target_y - self.pos_y
             dist = (dx**2 + dy**2)**0.5
             if dist > 3:
@@ -447,7 +544,8 @@ class DesktopPet:
         self._drag_y = event.y_root - self.root.winfo_y()
         
         if self.resume_after_id: self.root.after_cancel(self.resume_after_id)
-        self.resume_after_id = self.root.after(5000, self.resume_movement)
+        if not self.is_frozen:
+            self.resume_after_id = self.root.after(5000, self.resume_movement)
 
     def drag_move(self, event):
         self.is_dragging = True
@@ -463,17 +561,19 @@ class DesktopPet:
 
     def drag_end(self, event):
         self.is_dragging = False
-        self.is_paused = False
-        if self.resume_after_id: self.root.after_cancel(self.resume_after_id)
-        self.resume_after_id = self.root.after(3000, self.resume_movement)
+        if not self.is_frozen:
+            self.is_paused = False
+            if self.resume_after_id: self.root.after_cancel(self.resume_after_id)
+            self.resume_after_id = self.root.after(3000, self.resume_movement)
 
     def resume_movement(self):
-        self.is_paused, self.resume_after_id = False, None
+        if not self.is_frozen:
+            self.is_paused = False
+        self.resume_after_id = None
 
     # --- UI ACTIONS DELETED ---
     # show_search_input has been replaced by show_chat_window
 
-    # --- AI & VOICE ---
     # --- AI & VOICE ---
     def start_voice(self):
         if self.is_recording:
